@@ -6,6 +6,10 @@ Created on Thu Nov 28 12:22:41 2019
 """
 import inflector
 
+from stanfordcorenlp import StanfordCoreNLP
+nlp = StanfordCoreNLP("..\\stanford-server", lang = 'es')
+#need to run a java server
+
 #preprocess the query
 def singularizeQuery(query):
     query = query.lower().split()
@@ -19,10 +23,6 @@ def buildStopWords():
 
 def ifIsFromStopWords(word):
     return word in spanish_stopwords
-
-#need to run a java server
-from stanfordcorenlp import StanfordCoreNLP
-nlp = StanfordCoreNLP('http://localhost', port=9000)
 
 
 #keep from transcripts just the nouns in singular form

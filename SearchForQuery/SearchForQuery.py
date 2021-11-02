@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Created on Thu Nov 28 11:58:22 2019
 
@@ -6,171 +5,129 @@ Created on Thu Nov 28 11:58:22 2019
 """
 
 import tensorflow as tf
-tf.compat.v1.disable_v2_behavior()
 import tensorflow_hub as hub
 
-
 import gensim
+from gensim import models
+from gensim import similarities
+
 import pandas as pd
 import re
 import pickle
-import time
 
 import wiki
 import preprocessData as pData
 
-print("Don't forget to start StanfordCoreNLP!")
+class SearchForQuery:
 
-#extract data bases of videos
-def extractData():
-    for i in range(3):
-        dataframe = pd.read_excel("LabeledTranscripts.xlsx", engine = "openpyxl", usecols = [i+1])
-        yield dataframe.values
+    def __init__(self, noOfClusters):
+        tf.compat.v1.disable_v2_behavior()
 
-videosName,transcripts,labels = extractData()
+        self.__documents = []
+        self.__documentsWithLabels = [[],[],[]]
+        self.__preprocessedDocumentsList = []
+        self.__noOfClusters = noOfClusters
+        self.__preprocessedListForDictionary = [[],[],[]]
+        self.__dictionary = []
+        self.__lsi = [None] * self.__noOfClusters
+        self.__indexList = [None] * self.__noOfClusters
+        self.__embed = None
+        self.__clf = None
 
-print(videosName)
+        self.__processTranscripts()
+        self.__LSI()
+        self.__loadModel()
 
+    def __extractData(self):
+        for i in range(3):
+            dataframe = pd.read_excel("LabeledTranscripts.xlsx", engine = "openpyxl", usecols = [i])
+            yield dataframe.values
+    
+    #Process all transcripts
+    def __processTranscripts(self):
+        videosName,transcripts,labels = self.__extractData()
 
-documents = []
-documentsWithLabels = [[],[],[]]
-preprocessedDocumentsList = []
-videoIdDictionary = {}
+        nrOfTranscriptsToProcess = len(videosName)
 
+        for i in range(0, nrOfTranscriptsToProcess):
+            transcript = transcripts[i][0]
+            videoName = videosName[i][0]
+            label = labels[i][0]
+            if transcript !=  "" and len(transcript)>6000:      #keep only valid transcripts for preprocessing
+                preprocessedTranscript = pData.preprocess(transcript)   
 
-#Process all transcripts
-nrOfTranscriptsToProcess = len(videosName)
+                #keep all preprocessed transcripts in a container for each label
+                self.__documentsWithLabels[label].append((preprocessedTranscript,videoName))
+                
+                #keep all preprocessed transcripts together
+                self.__documents.append([preprocessedTranscript, videoName, label])
 
-print("initialized values!")
-
-for i in range(0,nrOfTranscriptsToProcess):
-    transcript = transcripts[i][0]
-    videoName = videosName[i][0]
-    label = labels[i][0]
-    if transcript !=  "" and len(transcript)>6000:      #keep only valid transcripts for preprocessing
-        preprocessedTranscript = pData.preprocess(transcript)   
-
-        #keep all preprocessed transcripts in a container for each label
-        documentsWithLabels[label].append((preprocessedTranscript,videoName))
+                #keep all words from transcripts
+                self.__preprocessedDocumentsList.append(preprocessedTranscript.split())
         
-        #keep all preprocessed transcripts together
-        documents.append([preprocessedTranscript, videoName, label])
+        index = 0
+        for transcript, videoName, label in self.__documents:
+            self.__preprocessedListForDictionary[label].append(self.__preprocessedDocumentsList[index])
+            index += 1
 
-        #keep all words from transcripts
-        preprocessedDocumentsList.append(preprocessedTranscript.split())
+    def __LSI(self):
+        for i in range(self.__noOfClusters):
+            self.__dictionary.append(gensim.corpora.Dictionary(self.__preprocessedListForDictionary[i]))
 
-   
-    
-noOfClusters = 3
-preprocessedListForDictionary = []
+        bow_corpus = [None] * self.__noOfClusters  
 
+        for i in range(self.__noOfClusters):
+            if( len(self.__dictionary[i]) != 0):
+                #we have to create a bag of words( BoW )
+                bow_corpus[i] = [self.__dictionary[i].doc2bow(doc) for doc in self.__preprocessedListForDictionary[i]]
+                
+                #we will transform it in a tf-idf vector
+                tfidf = models.TfidfModel(bow_corpus[i]) 
+                corpus_tfidf = tfidf[bow_corpus[i]]
 
-for i in range(noOfClusters):
-    preprocessedListForDictionary.append([])
-
-
-print("appended preprocessed list for dict")
-
-#append transcripts words in a list
-index = 0
-for transcript, videoName, label in documents:
-    preprocessedListForDictionary[label].append(preprocessedDocumentsList[index])
-    index += 1
-print("appende transcripts words in a list")
-
-
-# Creating the dictionaries for the LSI models
-
-dictionary = []
-for i in range(noOfClusters):
-    dictionary.append(gensim.corpora.Dictionary(preprocessedListForDictionary[i]))
-
-
-bow_corpus = [None] * noOfClusters  
-lsi = [None] * noOfClusters
-indexList = [None] * noOfClusters
-
-
-from gensim import models
-from gensim import similarities
-
-print("Created dictionary for the LSI models")
-
-# Creating the LSI models
-
-for i in range(noOfClusters):
-    if( len(dictionary[i]) != 0):
-        #we have to create a bag of words( BoW )
-        bow_corpus[i] = [dictionary[i].doc2bow(doc) for doc in preprocessedListForDictionary[i]]
+                self.__lsi[i] = models.LsiModel(corpus = corpus_tfidf, id2word = self.__dictionary[i], num_topics = 5)
+                #we will compute a similarity matrix, which it will help us later, for query
+                self.__indexList[i] = similarities.MatrixSimilarity(self.__lsi[i][corpus_tfidf])
+                
+                #print(indexList[0])
+                print(self.__lsi[i].print_topics(num_topics = 5, num_words = 10))
         
-        #we will transform it in a tf-idf vector
-        tfidf = models.TfidfModel(bow_corpus[i]) 
-        corpus_tfidf = tfidf[bow_corpus[i]]
 
-        lsi[i] = models.LsiModel(corpus = corpus_tfidf, id2word=dictionary[i], num_topics=5)
-        #we will compute a similarity matrix, which it will help us later, for query
-        indexList[i] = similarities.MatrixSimilarity(lsi[i][corpus_tfidf])
+    def __loadModel(self):
+        self.__embed = hub.load("https://tfhub.dev/google/nnlm-es-dim128-with-normalization/2")
+        self.__clf = pickle.load(open("pretrained_model.sav", 'rb'))
+
+    def resultForQuery(self, query):
+        ans = wiki.wikipedia_search(query)     #search a sequence on wiki pages
+        if(len(ans["itemList"]) != 0 ):             #if we have a result
+                queryWiki =  (ans["itemList"][0]["description"])       #assign as query this sequence
+        else:   
+                queryWiki = query                  #else assign just the query
         
-        #print(indexList[0])
-        print(lsi[i].print_topics(num_topics= 5 , num_words=10))
         
-print("Created the LSI models")
-#load the model
-embed = hub.load("https://tfhub.dev/google/nnlm-es-dim128-with-normalization/2")
-print("embed loaded")
-clf = pickle.load(open("pretrained_model.sav", 'rb'))
-
-print("loaded model", flush=True)
-#Function that returns the result for a query
-
-def resultForQuery(query):
-    ans = wiki.wikipedia_search(query)     #search a sequence on wiki pages
-    if(len(ans["itemList"]) != 0 ):             #if we have a result
-            queryWiki =  (ans["itemList"][0]["description"])       #assign as query this sequence
-    else:
-            queryWiki = query                  #else assign just the query
-    
-    
-    
-    with tf.compat.v1.Session() as session:
-            tf.compat.v1.disable_eager_execution()
-            session.run([tf.compat.v1.global_variables_initializer(), tf.compat.v1.tables_initializer()])
-            embeddedQueryWiki = session.run(embed([queryWiki]))
-
-    #make a predict for the query for its cluster
-    queryClusterWiki = clf.predict(embeddedQueryWiki)[0]
         
-    #search in assigned container
-    cluster = queryClusterWiki
-    
-    print("cluster")
-    print(cluster)
-    
-    #transform in a bow corpus the query
-    vec_bow = dictionary[cluster].doc2bow(pData.singularizeQuery(query))
-    # convert the query to LSI space
-    vec_lsi = lsi[cluster][vec_bow]  
-    
-    # perform a similarity query against the corpus
-    sims = indexList[cluster][vec_lsi]  
-    
-    
-    sims = sorted(enumerate(sims), key=lambda item: -item[1])
-    
-    #print top 10 results
-    for i, s in enumerate(sims[:10]):
-        print(s, documentsWithLabels[cluster][s[0]][1])
+        with tf.compat.v1.Session() as session:
+                tf.compat.v1.disable_eager_execution()
+                session.run([tf.compat.v1.global_variables_initializer(), tf.compat.v1.tables_initializer()])
+                embeddedQueryWiki = session.run(self.__embed([queryWiki]))
 
-
-
-while(True):
-    query = input()
-    millis = int(round(time.time() * 1000))
-    resultForQuery(query)
-    print('python query part took ', int(round(time.time() * 1000))-millis, ' seconds')
-    print('eoq',flush=True)
-
-
-
-
+        #make a predict for the query for its cluster
+        queryClusterWiki = self.__clf.predict(embeddedQueryWiki)[0]
+            
+        #search in assigned container
+        cluster = queryClusterWiki
+        
+        #transform in a bow corpus the query
+        vec_bow = self.__dictionary[cluster].doc2bow(pData.singularizeQuery(query))
+        # convert the query to LSI space
+        vec_lsi = self.__lsi[cluster][vec_bow]
+        
+        # perform a similarity query against the corpus
+        sims = self.__indexList[cluster][vec_lsi]  
+        
+        sims = sorted(enumerate(sims), key=lambda item: -item[1])
+        
+        #print top 10 results
+        for i, s in enumerate(sims[:10]):
+            print(s, self.__documentsWithLabels[cluster][s[0]][1])
 
